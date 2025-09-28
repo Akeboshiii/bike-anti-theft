@@ -1,13 +1,9 @@
-// Anti-theft MVP for Arduino UNO (Updated)
-// Components: ADXL345 (I2C optional), GY-NEO6MV2 GPS (NEO-6M family), HC-05 BT, Servo, Buzzer, Vibration sensor
+// Anti-theft MVP for Arduino UNO (BT via Serial)
+// Components: ADXL345 (I2C optional), GY-NEO6MV2 GPS, HC-05 BT, Servo, Buzzer, Vibration sensor
 // Libraries: TinyGPSPlus, SoftwareSerial, Servo
-// Wiring summary:
-//   GY-NEO6MV2: GPS TX -> Arduino pin 4 (SoftwareSerial RX), GPS RX -> Arduino pin 3 (SoftwareSerial TX), baud 9600
-//   HC-05 (BT): HC-05 TX -> Arduino pin 10 (SoftwareSerial RX), HC-05 RX -> Arduino pin 11 (SoftwareSerial TX), baud 9600
-//   Servo signal: pin 9
-//   Buzzer (active): pin 8
-//   LED status: pin 7
-//   Vibration sensor (digital): pin 5
+// GPS on SoftwareSerial (pins 4=RX, 3=TX)
+// HC-05 BT on hardware Serial (pins 0=RX, 1=TX) at 9600 baud
+// NOTE: disconnect HC-05 while uploading code via USB
 
 #include <Wire.h>
 #include <TinyGPSPlus.h>
@@ -20,17 +16,16 @@ const int buzzerPin = 8;
 const int ledPin = 7;
 const int vibrationPin = 5;
 
-// SoftwareSerial instances
-SoftwareSerial gpsSerial(4, 3);   // RX=4 (GPS TX), TX=3 (GPS RX)  <- GY-NEO6MV2
-SoftwareSerial btSerial(10, 11);  // RX=10 (HC-05 TX), TX=11 (HC-05 RX)
+// GPS stays on SoftwareSerial
+SoftwareSerial gpsSerial(4, 3);   // RX=4 (GPS TX), TX=3 (GPS RX)
 
 TinyGPSPlus gps;
 Servo brakeServo;
 
-// Timing & intervals
-const unsigned long alarmDurationMs = 30000;       // buzzer + brake duration (ms)
-const unsigned long locationSendInterval = 10000;  // ms between periodic updates
-const unsigned long motionDebounceMs = 500;        // debounce for vibration
+// Timing
+const unsigned long alarmDurationMs = 30000;
+const unsigned long locationSendInterval = 10000;
+const unsigned long motionDebounceMs = 500;
 
 // State
 bool armed = false;
@@ -39,10 +34,10 @@ unsigned long alarmStart = 0;
 unsigned long lastLocationSend = 0;
 unsigned long lastMotionTime = 0;
 
-// GPS fallback / caching
+// GPS fallback
 double lastLat = 0.0;
 double lastLon = 0.0;
-bool hasFixEver = false; // if true, preserve lastLat/lastLon forever
+bool hasFixEver = false;
 
 void setup() {
   pinMode(buzzerPin, OUTPUT);
@@ -52,29 +47,23 @@ void setup() {
   digitalWrite(buzzerPin, LOW);
   digitalWrite(ledPin, LOW);
 
-  Serial.begin(115200);
-  gpsSerial.begin(9600); // GY-NEO6MV2 default
-  btSerial.begin(9600);  // HC-05 default
+  Serial.begin(9600);   // HC-05 default baud
+  gpsSerial.begin(9600);
 
   brakeServo.attach(servoPin);
   releaseBrake();
 
-  // quick servo reset pulse
-  brakeServo.write(0);
-  delay(200);
-  brakeServo.write(0);
+  // reset servo
+  brakeServo.write(0); delay(200); brakeServo.write(0);
 
   sendBTState("DISARMED", true);
-  Serial.println("Anti-theft system ready.");
+  Serial.println("Anti-theft system ready (BT on Serial).");
 }
 
-// Main loop: prioritize GPS reading, then BT, then sensors & state
 void loop() {
-  // 1) Read GPS (priority)
-  gpsSerial.listen();
+  // 1) GPS
   while (gpsSerial.available()) {
     gps.encode(gpsSerial.read());
-    // if a valid GPS fix appears, cache it
     if (gps.location.isValid()) {
       lastLat = gps.location.lat();
       lastLon = gps.location.lng();
@@ -82,69 +71,49 @@ void loop() {
     }
   }
 
-  // 2) Read BT commands (non-blocking)
-  btSerial.listen();
-  if (btSerial.available()) {
-    String cmd = btSerial.readStringUntil('\n');
+  // 2) BT commands (via Serial)
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     handleBTCommand(cmd);
   }
 
-  // 3) Check motion (debounced)
+  // 3) Motion
   if (armed && !alarmActive) {
-    int motion = digitalRead(vibrationPin);
-    if (motion == HIGH && (millis() - lastMotionTime > motionDebounceMs)) {
+    if (digitalRead(vibrationPin) == HIGH && (millis() - lastMotionTime > motionDebounceMs)) {
       lastMotionTime = millis();
       triggerAlarm();
     }
   }
 
-  // 4) Alarm timeout handling
-  if (alarmActive) {
-    unsigned long now = millis();
-    if (now - alarmStart >= alarmDurationMs) {
-      stopAlarm();
-    }
+  // 4) Alarm timeout
+  if (alarmActive && (millis() - alarmStart >= alarmDurationMs)) {
+    stopAlarm();
   }
 
-  // 5) Periodic location/state updates (rate-limited)
-  unsigned long now = millis();
-  if (armed && (now - lastLocationSend >= locationSendInterval)) {
+  // 5) Periodic state updates
+  if (armed && (millis() - lastLocationSend >= locationSendInterval)) {
     sendBTState("ARMED", false);
-    lastLocationSend = now;
   }
 
-  // small loop delay to reduce CPU hogging
   delay(50);
 }
 
-// Send status over BT (and mirror to Serial). If force==true, bypass rate limit.
 void sendBTState(const String &status, bool force) {
   unsigned long now = millis();
   if (!force && (now - lastLocationSend < locationSendInterval)) return;
 
-  String latS = "0.000000";
-  String lonS = "0.000000";
-
+  String latS = "0.000000", lonS = "0.000000";
   if (gps.location.isValid()) {
     latS = String(gps.location.lat(), 6);
     lonS = String(gps.location.lng(), 6);
   } else if (hasFixEver) {
-    // use cached last known forever (Option 1)
     latS = String(lastLat, 6);
     lonS = String(lastLon, 6);
-  } else {
-    // No fix ever — Mode C: send 0,0
-    latS = "0.000000";
-    lonS = "0.000000";
   }
 
   String msg = status + "," + latS + "," + lonS + "\n";
-  btSerial.listen();
-  btSerial.print(msg);
-  Serial.print("Sent: ");
-  Serial.print(msg);
-
+  Serial.print(msg);  // goes to HC-05 now
   lastLocationSend = now;
 }
 
@@ -154,8 +123,7 @@ void triggerAlarm() {
   engageBrake();
   soundBuzzer(true);
   digitalWrite(ledPin, HIGH);
-  sendBTState("STOLEN", true); // force immediate STOLEN broadcast
-  Serial.println("ALARM TRIGGERED: STOLEN");
+  sendBTState("STOLEN", true);
 }
 
 void stopAlarm() {
@@ -164,46 +132,28 @@ void stopAlarm() {
   releaseBrake();
   digitalWrite(ledPin, LOW);
   sendBTState(armed ? "ARMED" : "DISARMED", true);
-  Serial.println("Alarm stopped.");
 }
 
-void engageBrake() {
-  brakeServo.write(80); // adjust angle for locked position (tune for your servo)
-}
+void engageBrake() { brakeServo.write(80); }
+void releaseBrake() { brakeServo.write(0); }
+void soundBuzzer(bool on) { digitalWrite(buzzerPin, on ? HIGH : LOW); }
 
-void releaseBrake() {
-  brakeServo.write(0); // unlocked
-}
-
-void soundBuzzer(bool on) {
-  digitalWrite(buzzerPin, on ? HIGH : LOW);
-}
-
-// Handle simple BT commands: ARM, DISARM, STATUS (returns current)
 void handleBTCommand(const String &cmdIn) {
   if (cmdIn.length() == 0) return;
-  String cmd = cmdIn;
-  cmd.toUpperCase();
-  cmd.trim();
+  String cmd = cmdIn; cmd.toUpperCase();
 
   if (cmd == "ARM") {
     armed = true;
     sendBTState("ARMED", true);
-    Serial.println("ARMED via BT");
   } else if (cmd == "DISARM") {
     armed = false;
     alarmActive = false;
     soundBuzzer(false);
     releaseBrake();
     sendBTState("DISARMED", true);
-    Serial.println("DISARMED via BT");
   } else if (cmd == "STATUS") {
     sendBTState(armed ? "ARMED" : "DISARMED", true);
-    Serial.println("STATUS requested via BT");
   } else {
-    // Unknown command - echo back
-    btSerial.listen();
-    btSerial.print("UNKNOWN_CMD\n");
-    Serial.print("Unknown BT command: "); Serial.println(cmdIn);
+    Serial.print("UNKNOWN_CMD\n");
   }
 }
