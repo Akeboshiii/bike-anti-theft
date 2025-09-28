@@ -1,9 +1,6 @@
-// Anti-theft MVP for Arduino UNO (BT via Serial)
-// Components: ADXL345 (I2C optional), GY-NEO6MV2 GPS, HC-05 BT, Servo, Buzzer, Vibration sensor
-// Libraries: TinyGPSPlus, SoftwareSerial, Servo
-// GPS on SoftwareSerial (pins 4=RX, 3=TX)
-// HC-05 BT on hardware Serial (pins 0=RX, 1=TX) at 9600 baud
-// NOTE: disconnect HC-05 while uploading code via USB
+// Anti-theft MVP for Arduino UNO (Analog vibration on A0)
+// HC-05 on hardware Serial (pins 0/1). GPS on SoftwareSerial (4=RX,3=TX).
+// Vibration sensor: A0 (analog). Trigger condition: analogRead(A0) >= 100
 
 #include <Wire.h>
 #include <TinyGPSPlus.h>
@@ -14,9 +11,10 @@
 const int servoPin = 9;
 const int buzzerPin = 8;
 const int ledPin = 7;
-const int vibrationPin = 5;
+const int vibrationPin = A0; // analog input
+const int vibrationThreshold = 100; // >= triggers stolen
 
-// GPS stays on SoftwareSerial
+// GPS on SoftwareSerial
 SoftwareSerial gpsSerial(4, 3);   // RX=4 (GPS TX), TX=3 (GPS RX)
 
 TinyGPSPlus gps;
@@ -42,26 +40,28 @@ bool hasFixEver = false;
 void setup() {
   pinMode(buzzerPin, OUTPUT);
   pinMode(ledPin, OUTPUT);
-  pinMode(vibrationPin, INPUT);
+  // analog pins don't require pinMode but safe to leave as-is
 
   digitalWrite(buzzerPin, LOW);
   digitalWrite(ledPin, LOW);
 
-  Serial.begin(9600);   // HC-05 default baud
-  gpsSerial.begin(9600);
+  Serial.begin(9600);   // HC-05 on hardware Serial
+  gpsSerial.begin(9600); // GY-NEO6MV2
 
   brakeServo.attach(servoPin);
   releaseBrake();
 
-  // reset servo
-  brakeServo.write(0); delay(200); brakeServo.write(0);
+  // servo reset
+  brakeServo.write(0);
+  delay(200);
+  brakeServo.write(0);
 
   sendBTState("DISARMED", true);
-  Serial.println("Anti-theft system ready (BT on Serial).");
+  Serial.println("Anti-theft system ready (Analog vibration A0).");
 }
 
 void loop() {
-  // 1) GPS
+  // 1) GPS reads (priority)
   while (gpsSerial.available()) {
     gps.encode(gpsSerial.read());
     if (gps.location.isValid()) {
@@ -71,16 +71,17 @@ void loop() {
     }
   }
 
-  // 2) BT commands (via Serial)
+  // 2) BT commands via Serial
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     handleBTCommand(cmd);
   }
 
-  // 3) Motion
+  // 3) Motion check using analog read (debounced)
   if (armed && !alarmActive) {
-    if (digitalRead(vibrationPin) == HIGH && (millis() - lastMotionTime > motionDebounceMs)) {
+    int motionVal = analogRead(vibrationPin); // 0..1023
+    if (motionVal >= vibrationThreshold && (millis() - lastMotionTime > motionDebounceMs)) {
       lastMotionTime = millis();
       triggerAlarm();
     }
@@ -91,7 +92,7 @@ void loop() {
     stopAlarm();
   }
 
-  // 5) Periodic state updates
+  // 5) Periodic state/location updates
   if (armed && (millis() - lastLocationSend >= locationSendInterval)) {
     sendBTState("ARMED", false);
   }
@@ -113,7 +114,7 @@ void sendBTState(const String &status, bool force) {
   }
 
   String msg = status + "," + latS + "," + lonS + "\n";
-  Serial.print(msg);  // goes to HC-05 now
+  Serial.print(msg); // go to HC-05
   lastLocationSend = now;
 }
 
@@ -124,6 +125,7 @@ void triggerAlarm() {
   soundBuzzer(true);
   digitalWrite(ledPin, HIGH);
   sendBTState("STOLEN", true);
+  Serial.println("ALARM TRIGGERED: STOLEN");
 }
 
 void stopAlarm() {
@@ -132,6 +134,7 @@ void stopAlarm() {
   releaseBrake();
   digitalWrite(ledPin, LOW);
   sendBTState(armed ? "ARMED" : "DISARMED", true);
+  Serial.println("Alarm stopped.");
 }
 
 void engageBrake() { brakeServo.write(80); }
@@ -140,19 +143,22 @@ void soundBuzzer(bool on) { digitalWrite(buzzerPin, on ? HIGH : LOW); }
 
 void handleBTCommand(const String &cmdIn) {
   if (cmdIn.length() == 0) return;
-  String cmd = cmdIn; cmd.toUpperCase();
+  String cmd = cmdIn; cmd.toUpperCase(); cmd.trim();
 
   if (cmd == "ARM") {
     armed = true;
     sendBTState("ARMED", true);
+    Serial.println("ARMED via BT");
   } else if (cmd == "DISARM") {
     armed = false;
     alarmActive = false;
     soundBuzzer(false);
     releaseBrake();
     sendBTState("DISARMED", true);
+    Serial.println("DISARMED via BT");
   } else if (cmd == "STATUS") {
     sendBTState(armed ? "ARMED" : "DISARMED", true);
+    Serial.println("STATUS requested via BT");
   } else {
     Serial.print("UNKNOWN_CMD\n");
   }
