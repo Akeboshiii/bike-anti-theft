@@ -1,3 +1,4 @@
+
 // Anti-theft (App Inventor compatible CSV output)
 // HC-05 on hardware Serial (pins 0=RX,1=TX). GPS on SoftwareSerial (4=RX,3=TX).
 // Vibration sensor: A0 analog, threshold >=100
@@ -159,4 +160,3 @@ void handleBTCommand(const String &cmdIn) {
     Serial.print("UNKNOWN,0.000000,0.000000\n");
   }
 }
-
