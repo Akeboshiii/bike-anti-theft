@@ -88,8 +88,8 @@ void loop() {
   }
 
   // Periodic state/location updates
-  if (armed && (millis() - lastLocationSend >= locationSendInterval)) {
-    sendBTState("ARMED", false);
+  if (millis() - lastLocationSend >= locationSendInterval) {
+    sendBTState(alarmActive ? "STOLEN" : (armed ? "ARMED" : "DISARMED"), false);
   }
 
   delay(50);
@@ -159,3 +159,4 @@ void handleBTCommand(const String &cmdIn) {
     Serial.print("UNKNOWN,0.000000,0.000000\n");
   }
 }
+
